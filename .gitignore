@@ -6,6 +6,8 @@ out/
 # NuGet
 nupkg/
 *.nupkg
+# Allow the pre-built tool package
+!tools/*.nupkg
 
 # IDE
 .vs/

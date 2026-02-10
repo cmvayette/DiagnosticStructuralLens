@@ -31,6 +31,7 @@ public record SqlAtom
     public string? DataType { get; init; }
     public bool IsNullable { get; init; }
     public string? FilePath { get; init; }
+    public int? LineNumber { get; init; }
 }
 
 /// <summary>

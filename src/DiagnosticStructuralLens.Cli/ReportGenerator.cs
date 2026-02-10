@@ -52,8 +52,15 @@ public static class ReportGenerator
         // 6. Governance Violations
         AppendGovernance(sb, governanceViolations);
 
-        // 7-9. Analyzer Findings (only if analyzers were run)
+        // 7. Database Boundary (stored procedure dependencies)
+        bool hasStoredProcs = snapshot.SqlAtoms.Any(a => a.Type == SqlAtomType.StoredProcedure);
         int sectionNum = 7;
+        if (hasStoredProcs)
+        {
+            AppendDbBoundary(sb, snapshot, sectionNum++);
+        }
+
+        // Analyzer Findings (dynamically numbered)
         if (analysisReport != null)
         {
             if (analysisReport.HasCategory(FindingCategory.Architecture))
@@ -277,6 +284,54 @@ public static class ReportGenerator
             sb.AppendLine($"- ❌ {violation}");
         }
 
+        sb.AppendLine();
+    }
+
+    private static void AppendDbBoundary(StringBuilder sb, Snapshot snapshot, int sectionNum)
+    {
+        sb.AppendLine($"## {sectionNum}. Database Boundary — Stored Procedure Dependencies");
+        sb.AppendLine();
+        sb.AppendLine("> Your code calls these stored procedures. The database team owns the implementation.");
+        sb.AppendLine();
+
+        var storedProcs = snapshot.SqlAtoms
+            .Where(a => a.Type == SqlAtomType.StoredProcedure)
+            .ToList();
+
+        // Build caller map: for each proc, find which classes call it
+        var procCallers = new Dictionary<string, List<(string CallerName, string Evidence)>>();
+        foreach (var proc in storedProcs)
+        {
+            var callers = snapshot.Links
+                .Where(l => l.TargetId == proc.Id && l.Type == LinkType.Calls)
+                .Select(l =>
+                {
+                    var callerAtom = snapshot.CodeAtoms.FirstOrDefault(a =>
+                        a.Id.Equals(l.SourceId, StringComparison.OrdinalIgnoreCase));
+                    var callerName = callerAtom?.Name ?? l.SourceId.Split('.').LastOrDefault() ?? l.SourceId;
+                    return (CallerName: callerName, Evidence: l.Evidence ?? "");
+                })
+                .ToList();
+
+            procCallers[proc.Name] = callers;
+        }
+
+        sb.AppendLine("| Stored Procedure | Called From | Call Count |");
+        sb.AppendLine("|-----------------|------------|-----------|");
+
+        foreach (var proc in storedProcs.OrderBy(p => p.Name))
+        {
+            var callers = procCallers.GetValueOrDefault(proc.Name, []);
+            var callerNames = callers.Select(c => c.CallerName).Distinct().ToList();
+            var callerStr = callerNames.Count > 0
+                ? string.Join(", ", callerNames)
+                : "_unknown_";
+            sb.AppendLine($"| `{proc.Name}` | {callerStr} | {callers.Count} |");
+        }
+
+        sb.AppendLine();
+        sb.AppendLine($"**Total:** {storedProcs.Count} stored procedure(s) referenced across " +
+            $"{procCallers.Values.SelectMany(c => c.Select(x => x.CallerName)).Distinct().Count()} component(s)");
         sb.AppendLine();
     }
 

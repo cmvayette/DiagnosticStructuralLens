@@ -1,7 +1,7 @@
-# Azure DevOps Pipeline — Architecture Quality Gate
-#
-# This pipeline runs the DSL architecture report on every PR
-# and blocks the merge if policy thresholds are exceeded.
+# This pipeline runs the DSL architecture report when creating or updating a
+# PR to a release branch, providing a quality gate before production deployment.
+# For teams with single-developer workflows (no peer review), this provides
+# automated architecture review at the point that matters — release time.
 #
 # Prerequisites:
 # 1. Build the NuGet package: dotnet pack src/DiagnosticStructuralLens.Cli -c Release -o ./tools
@@ -14,7 +14,7 @@ pr:
   branches:
     include:
       - main
-      - develop
+      - 'release/*'
 
 pool:
   vmImage: 'windows-latest'

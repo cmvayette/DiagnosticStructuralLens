@@ -11,7 +11,7 @@ namespace DiagnosticStructuralLens.Scanner.CSharp;
 public class CSharpScanner : IScanner
 {
     private static readonly HashSet<string> DtoSuffixes = ["DTO", "Dto", "Request", "Response", "ViewModel", "Model"];
-    private static readonly HashSet<string> DtoAttributes = ["DataContract", "DataContractAttribute", "Serializable", "SerializableAttribute"];
+    private static readonly HashSet<string> DtoAttributes = ["Dto", "DtoAttribute", "DataContract", "DataContractAttribute", "Serializable", "SerializableAttribute"];
     
     public async Task<ScanResult> ScanAsync(string path, ScanOptions? options = null, CancellationToken cancellationToken = default)
     {
@@ -337,7 +337,9 @@ public class CSharpScanner : IScanner
     private void ExtractDapperQueries(CompilationUnitSyntax root, string filePath, ScanResult result)
     {
         var dapperMethods = new[] { "Query", "QueryAsync", "QueryFirst", "QueryFirstAsync", 
-            "QueryFirstOrDefault", "QueryFirstOrDefaultAsync", "Execute", "ExecuteAsync" };
+            "QueryFirstOrDefault", "QueryFirstOrDefaultAsync", "Execute", "ExecuteAsync",
+            "QuerySingle", "QuerySingleAsync", "QuerySingleOrDefault", "QuerySingleOrDefaultAsync",
+            "QueryMultiple", "QueryMultipleAsync", "ExecuteScalar", "ExecuteScalarAsync" };
 
         foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
         {
@@ -349,21 +351,153 @@ public class CSharpScanner : IScanner
 
             if (methodName != null && dapperMethods.Contains(methodName))
             {
-                // Extract SQL string from first argument
+                // Extract SQL/proc name from first argument
                 var firstArg = invocation.ArgumentList.Arguments.FirstOrDefault();
                 if (firstArg?.Expression is LiteralExpressionSyntax literal)
                 {
                     var sql = literal.Token.ValueText;
-                    // Create diagnostic noting the inline SQL
-                    result.Diagnostics.Add(new ScanDiagnostic(
-                        Core.DiagnosticSeverity.Info,
-                        $"Dapper SQL detected: {TruncateSql(sql)}",
-                        filePath,
-                        invocation.GetLocation().GetLineSpan().StartLinePosition.Line + 1
-                    ));
+                    var lineNum = invocation.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
+
+                    // Detect stored procedure calls (name without spaces = likely a proc)
+                    if (IsStoredProcName(sql))
+                    {
+                        var procAtom = new SqlAtom
+                        {
+                            Id = $"sp:{sql}".ToLowerInvariant(),
+                            Name = sql,
+                            Type = SqlAtomType.StoredProcedure,
+                            FilePath = filePath,
+                            LineNumber = lineNum
+                        };
+                        if (!result.SqlAtoms.Any(a => a.Id == procAtom.Id))
+                            result.SqlAtoms.Add(procAtom);
+
+                        // Find the containing class to create a link
+                        var containingClass = invocation.Ancestors()
+                            .OfType<TypeDeclarationSyntax>().FirstOrDefault();
+                        if (containingClass != null)
+                        {
+                            var classNs = GetNamespace(containingClass);
+                            var classId = $"{classNs}.{containingClass.Identifier.Text}".ToLowerInvariant();
+                            result.Links.Add(new AtomLink
+                            {
+                                Id = $"calls-sp-{classId}-{procAtom.Id}",
+                                SourceId = classId,
+                                TargetId = procAtom.Id,
+                                Type = LinkType.Calls,
+                                Confidence = 0.9,
+                                Evidence = $"Dapper {methodName}(\"{sql}\") at line {lineNum}"
+                            });
+                        }
+
+                        result.Diagnostics.Add(new ScanDiagnostic(
+                            Core.DiagnosticSeverity.Info,
+                            $"Stored procedure call detected: {sql}",
+                            filePath, lineNum));
+                    }
+                    else
+                    {
+                        result.Diagnostics.Add(new ScanDiagnostic(
+                            Core.DiagnosticSeverity.Info,
+                            $"Dapper SQL detected: {TruncateSql(sql)}",
+                            filePath, lineNum));
+                    }
                 }
             }
         }
+
+        // Also detect ADO.NET stored procedure calls:
+        // cmd.CommandText = "usp_GetCustomers";
+        // new SqlCommand("usp_GetCustomers", ...)
+        ExtractAdoNetProcCalls(root, filePath, result);
+    }
+
+    private void ExtractAdoNetProcCalls(CompilationUnitSyntax root, string filePath, ScanResult result)
+    {
+        foreach (var assignment in root.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+        {
+            // cmd.CommandText = "usp_Something";
+            if (assignment.Left is MemberAccessExpressionSyntax ma &&
+                ma.Name.Identifier.Text == "CommandText" &&
+                assignment.Right is LiteralExpressionSyntax literal)
+            {
+                var procName = literal.Token.ValueText;
+                if (IsStoredProcName(procName))
+                {
+                    var lineNum = assignment.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
+                    RegisterProcCall(procName, root, assignment, filePath, lineNum, result);
+                }
+            }
+        }
+
+        // new SqlCommand("usp_Something", connection)
+        foreach (var creation in root.DescendantNodes().OfType<ObjectCreationExpressionSyntax>())
+        {
+            var typeName = creation.Type.ToString();
+            if (typeName is "SqlCommand" or "System.Data.SqlClient.SqlCommand" or "Microsoft.Data.SqlClient.SqlCommand")
+            {
+                var firstArg = creation.ArgumentList?.Arguments.FirstOrDefault();
+                if (firstArg?.Expression is LiteralExpressionSyntax lit)
+                {
+                    var procName = lit.Token.ValueText;
+                    if (IsStoredProcName(procName))
+                    {
+                        var lineNum = creation.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
+                        RegisterProcCall(procName, root, creation, filePath, lineNum, result);
+                    }
+                }
+            }
+        }
+    }
+
+    private void RegisterProcCall(string procName, CompilationUnitSyntax root, SyntaxNode node,
+        string filePath, int lineNum, ScanResult result)
+    {
+        var procAtom = new SqlAtom
+        {
+            Id = $"sp:{procName}".ToLowerInvariant(),
+            Name = procName,
+            Type = SqlAtomType.StoredProcedure,
+            FilePath = filePath,
+            LineNumber = lineNum
+        };
+        if (!result.SqlAtoms.Any(a => a.Id == procAtom.Id))
+            result.SqlAtoms.Add(procAtom);
+
+        var containingClass = node.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault();
+        if (containingClass != null)
+        {
+            var classNs = GetNamespace(containingClass);
+            var classId = $"{classNs}.{containingClass.Identifier.Text}".ToLowerInvariant();
+            result.Links.Add(new AtomLink
+            {
+                Id = $"calls-sp-{classId}-{procAtom.Id}-{lineNum}",
+                SourceId = classId,
+                TargetId = procAtom.Id,
+                Type = LinkType.Calls,
+                Confidence = 0.9,
+                Evidence = $"ADO.NET call to \"{procName}\" at line {lineNum}"
+            });
+        }
+
+        result.Diagnostics.Add(new ScanDiagnostic(
+            Core.DiagnosticSeverity.Info,
+            $"Stored procedure call detected: {procName}",
+            filePath, lineNum));
+    }
+
+    /// <summary>
+    /// Heuristic: a stored proc name is a single token (no spaces, no SQL keywords)
+    /// that looks like an identifier — e.g., "usp_GetCustomers", "sp_UpdateOrder"
+    /// </summary>
+    private static bool IsStoredProcName(string sql)
+    {
+        if (string.IsNullOrWhiteSpace(sql)) return false;
+        var trimmed = sql.Trim();
+        // No spaces = not a SQL statement, likely a proc name
+        if (trimmed.Contains(' ') || trimmed.Contains('\n')) return false;
+        // Must be a valid identifier-ish string
+        return trimmed.Length > 2 && !trimmed.StartsWith("--");
     }
 
     private static string TruncateSql(string sql) 
