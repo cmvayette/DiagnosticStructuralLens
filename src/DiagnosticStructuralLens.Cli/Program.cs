@@ -45,7 +45,7 @@ public class Program
             "blast" => await ExecuteBlast(args[1..]),
             "risk" => await ExecuteRisk(args[1..]),
             "federate" => await ExecuteFederate(args[1..]),
-            "publish" => await ExecutePublish(args[1..]),
+
             "interpret" => await ExecuteInterpret(args[1..]),
             "report" => await ExecuteReport(args[1..]),
             "--help" or "-h" => PrintHelp(),
@@ -63,27 +63,27 @@ public class Program
 
             Commands:
               report    Scan + analyze a repo and generate a markdown architecture report
-              scan      Scan a repository for components and database objects
-              diff      Compare snapshots and detect breaking changes
+              scan      Scan a repository and generate a snapshot JSON
+              diff      Compare two snapshots and detect breaking changes
               blast     Calculate impact radius for a component
-              risk      Generate risk report for a snapshot
-              federate  Merge multiple snapshots into a global map
-              publish   Publish a snapshot to the DSL API
+              risk      Generate risk report from a snapshot
+              federate  Merge multiple repo snapshots into a global map
               interpret Read a snapshot and generate a human-readable summary
 
             Report Options:
               --repo <path>       Path to repository (required)
               --output <file>     Output report file (default: <repo>/dsl-report.md)
+              --output-json <f>   Output structured JSON results for CI/CD
+              --policy <file>     Policy YAML for quality gates
               --include-private   Include internal/private types
               --top <n>           Show top N risky components (default: 10)
+              --ci                CI mode — exit code 1 on policy failure
 
             Scan Options:
               --repo <path>       Path to repository (required)
               --output <file>     Output snapshot file (default: snapshot.json)
               --include-private   Include internal/private types
               --no-link           Skip semantic linking phase
-              --publish           Automatically publish to the API after scanning
-              --url <url>         API endpoint URL (default: http://localhost:8080/load)
 
             Diff Options:
               --baseline <file>   Baseline snapshot file (required)
@@ -92,7 +92,7 @@ public class Program
 
             Blast Options:
               --snapshot <file>   Snapshot file to analyze (required)
-              --atom <id>         Component ID to calculate impact radius for (required)
+              --component <id>    Component ID to calculate impact for (required)
               --depth <n>         Max depth to traverse (default: 5)
 
             Risk Options:
@@ -101,9 +101,7 @@ public class Program
               --output <file>     Output file (optional, writes to stdout if omitted)
               --top <n>           Show top N risky components (default: 10)
 
-            Publish Options:
-              --file <file>       Snapshot file to publish (required)
-              --url <url>         API endpoint URL (default: http://localhost:8080/load)
+
 
             Federate Options:
               --snapshots <files> Comma-separated list of snapshot files (required)
@@ -115,16 +113,7 @@ public class Program
               --snapshot <file>   Snapshot file to read (required)
               --output <file>     Output file (optional, writes to stdout if omitted)
 
-            Examples:
-              dsl report --repo .                              # Full architecture report
-              dsl report --repo . --output docs/report.md      # Custom output path
-              dsl scan --repo ./src --output ./snapshot.json
-              dsl diff --baseline main.json --snapshot current.json
-              dsl blast --snapshot ./snapshot.json --atom table:users
-              dsl risk --snapshot ./snapshot.json --format html --output risk.html
-              dsl publish --file ./snapshot.json
-              dsl scan --repo . --publish
-              dsl interpret --snapshot ./snapshot.json
+            See GUIDE.md for detailed usage examples and workflows.
             """);
         return 0;
     }
@@ -156,9 +145,7 @@ public class Program
         string? outputPath = null;
         bool includePrivate = false;
         bool skipLinking = false;
-        bool publish = false;
-        string publishUrl = "http://localhost:8080/load";
-        string language = "all"; // "all", "csharp", "typescript"
+        string language = "all";
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -176,12 +163,7 @@ public class Program
                 case "--no-link":
                     skipLinking = true;
                     break;
-                case "--publish":
-                    publish = true;
-                    break;
-                case "--url" when i + 1 < args.Length:
-                    publishUrl = args[++i];
-                    break;
+
                 case "--language" when i + 1 < args.Length:
                     language = args[++i].ToLowerInvariant();
                     break;
@@ -228,7 +210,7 @@ public class Program
             Log("   Scanning C# files...", "📦");
             var csharpScanner = new CSharpScanner();
             var csharpResult = await csharpScanner.ScanAsync(fullRepoPath, options);
-            Console.WriteLine($"      Found {csharpResult.CodeAtoms.Count} code atoms, {csharpResult.Links.Count} links");
+            Console.WriteLine($"      Found {csharpResult.CodeAtoms.Count} components, {csharpResult.Links.Count} links");
             allCodeAtoms.AddRange(csharpResult.CodeAtoms);
             allLinks.AddRange(csharpResult.Links);
             allDiagnostics.AddRange(csharpResult.Diagnostics);
@@ -237,7 +219,7 @@ public class Program
             Log("   Scanning SQL files...", "🗄️");
             var sqlScanner = new SqlScanner();
             var sqlResult = await sqlScanner.ScanAsync(fullRepoPath, options);
-            Console.WriteLine($"      Found {sqlResult.SqlAtoms.Count} SQL atoms, {sqlResult.Links.Count} links");
+            Console.WriteLine($"      Found {sqlResult.SqlAtoms.Count} database objects, {sqlResult.Links.Count} links");
             allSqlAtoms.AddRange(sqlResult.SqlAtoms);
             allLinks.AddRange(sqlResult.Links);
             allDiagnostics.AddRange(sqlResult.Diagnostics);
@@ -249,7 +231,7 @@ public class Program
             Log("   Scanning TypeScript files...", "💠");
             var tsScanner = new TypeScriptScanner();
             var tsResult = await tsScanner.ScanAsync(fullRepoPath, options);
-            Console.WriteLine($"      Found {tsResult.CodeAtoms.Count} TS atoms, {tsResult.Links.Count} links");
+            Console.WriteLine($"      Found {tsResult.CodeAtoms.Count} TS components, {tsResult.Links.Count} links");
             allCodeAtoms.AddRange(tsResult.CodeAtoms);
             allLinks.AddRange(tsResult.Links);
             allDiagnostics.AddRange(tsResult.Diagnostics);
@@ -360,20 +342,15 @@ public class Program
         Console.WriteLine($"""
 
             Summary:
-              Code Atoms:  {snapshot.Metadata.TotalCodeAtoms:N0}
+              Components:  {snapshot.Metadata.TotalCodeAtoms:N0}
                 DTOs:      {snapshot.Metadata.DtoCount:N0}
                 Interfaces:{snapshot.Metadata.InterfaceCount:N0}
-              SQL Atoms:   {snapshot.Metadata.TotalSqlAtoms:N0}
+              DB Objects:  {snapshot.Metadata.TotalSqlAtoms:N0}
                 Tables:    {snapshot.Metadata.TableCount:N0}
                 Procs:     {snapshot.Metadata.StoredProcedureCount:N0}
               Links:       {snapshot.Metadata.TotalLinks:N0}
               Duration:    {snapshot.Metadata.ScanDuration.TotalSeconds:F2}s
             """);
-
-        if (publish)
-        {
-            await PublishSnapshotAsync(outputPath, publishUrl);
-        }
 
         return 0;
     }
@@ -446,18 +423,18 @@ public class Program
         Console.WriteLine($"""
 
             Results:
-              Code Atoms:
+              Code Components:
                 Added:   {addedCode.Count:N0}
                 Removed: {removedCode.Count:N0}
-              SQL Atoms:
+              Database Objects:
                 Added:   {addedSql.Count:N0}
                 Removed: {removedSql.Count:N0}
-              Blast Radius: {affectedByRemovals.Count:N0} atoms potentially affected
+              Blast Radius: {affectedByRemovals.Count:N0} components potentially affected
             """);
 
         if (removedCode.Count > 0)
         {
-            Console.WriteLine("\n⚠️  Removed code atoms (potentially breaking):");
+            Console.WriteLine("\n⚠️  Removed components (potentially breaking):");
             foreach (var id in removedCode.Take(10))
             {
                 var atom = baseline.CodeAtoms.First(a => a.Id == id);
@@ -469,7 +446,7 @@ public class Program
 
         if (removedSql.Count > 0)
         {
-            Console.WriteLine("\n⚠️  Removed SQL atoms (potentially breaking):");
+            Console.WriteLine("\n⚠️  Removed database objects (potentially breaking):");
             foreach (var id in removedSql.Take(10))
             {
                 var atom = baseline.SqlAtoms.First(a => a.Id == id);
@@ -485,7 +462,7 @@ public class Program
     private static async Task<int> ExecuteBlast(string[] args)
     {
         string? snapshotPath = null;
-        string? atomId = null;
+        string? componentId = null;
         int depth = 5;
 
         for (int i = 0; i < args.Length; i++)
@@ -495,8 +472,8 @@ public class Program
                 case "--snapshot" when i + 1 < args.Length:
                     snapshotPath = args[++i];
                     break;
-                case "--atom" when i + 1 < args.Length:
-                    atomId = args[++i];
+                case "--atom" or "--component" when i + 1 < args.Length:
+                    componentId = args[++i];
                     break;
                 case "--depth" when i + 1 < args.Length:
                     depth = int.Parse(args[++i]);
@@ -504,32 +481,32 @@ public class Program
             }
         }
 
-        if (string.IsNullOrEmpty(snapshotPath) || string.IsNullOrEmpty(atomId))
+        if (string.IsNullOrEmpty(snapshotPath) || string.IsNullOrEmpty(componentId))
         {
-            Console.WriteLine("Error: --snapshot and --atom are required");
+            Console.WriteLine("Error: --snapshot and --component are required");
             return 1;
         }
 
-        Console.WriteLine($"💥 Calculating blast radius for: {atomId}");
+        Console.WriteLine($"💥 Calculating blast radius for: {componentId}");
 
         // Load snapshot
         var json = await File.ReadAllTextAsync(snapshotPath);
         var snapshot = JsonSerializer.Deserialize<Snapshot>(json, JsonOptions)!;
 
         // Find the atom
-        var codeAtom = snapshot.CodeAtoms.FirstOrDefault(a => a.Id == atomId);
-        var sqlAtom = snapshot.SqlAtoms.FirstOrDefault(a => a.Id == atomId);
+        var codeMatch = snapshot.CodeAtoms.FirstOrDefault(a => a.Id == componentId);
+        var sqlMatch = snapshot.SqlAtoms.FirstOrDefault(a => a.Id == componentId);
 
-        if (codeAtom == null && sqlAtom == null)
+        if (codeMatch == null && sqlMatch == null)
         {
             // Try partial match
-            codeAtom = snapshot.CodeAtoms.FirstOrDefault(a => a.Id.Contains(atomId, StringComparison.OrdinalIgnoreCase));
-            sqlAtom = snapshot.SqlAtoms.FirstOrDefault(a => a.Id.Contains(atomId, StringComparison.OrdinalIgnoreCase));
+            codeMatch = snapshot.CodeAtoms.FirstOrDefault(a => a.Id.Contains(componentId, StringComparison.OrdinalIgnoreCase));
+            sqlMatch = snapshot.SqlAtoms.FirstOrDefault(a => a.Id.Contains(componentId, StringComparison.OrdinalIgnoreCase));
             
-            if (codeAtom == null && sqlAtom == null)
+            if (codeMatch == null && sqlMatch == null)
             {
-                Console.WriteLine($"Error: Atom '{atomId}' not found in snapshot");
-                Console.WriteLine("\nAvailable atoms (sample):");
+                Console.WriteLine($"Error: Component '{componentId}' not found in snapshot");
+                Console.WriteLine("\nAvailable components (sample):");
                 foreach (var a in snapshot.CodeAtoms.Take(5))
                     Console.WriteLine($"  - {a.Id}");
                 foreach (var a in snapshot.SqlAtoms.Take(5))
@@ -537,25 +514,25 @@ public class Program
                 return 1;
             }
             
-            atomId = codeAtom?.Id ?? sqlAtom?.Id;
-            Console.WriteLine($"   (Matched to: {atomId})");
+            componentId = codeMatch?.Id ?? sqlMatch?.Id;
+            Console.WriteLine($"   (Matched to: {componentId})");
         }
 
         // Calculate blast radius
         var linker = new SemanticLinker();
-        var blastRadius = linker.GetBlastRadius(atomId!, snapshot.Links, depth);
+        var blastRadius = linker.GetBlastRadius(componentId!, snapshot.Links, depth);
 
         Console.WriteLine($"""
 
             Blast Radius Results:
-              Root Atom:     {atomId}
-              Total Affected: {blastRadius.TotalAffected}
-              Max Depth:      {blastRadius.MaxDepth}
+              Root Component: {componentId}
+              Total Affected:  {blastRadius.TotalAffected}
+              Max Depth:       {blastRadius.MaxDepth}
             """);
 
         if (blastRadius.TotalAffected > 0)
         {
-            Console.WriteLine("\nAffected atoms by depth:");
+            Console.WriteLine("\nAffected components by depth:");
             
             var byDepth = blastRadius.AffectedAtoms
                 .GroupBy(a => a.Depth)
@@ -578,53 +555,13 @@ public class Program
         }
         else
         {
-            Console.WriteLine("\n✅ No dependents found - changes to this atom have minimal impact.");
+            Console.WriteLine("\n✅ No dependents found - changes to this component have minimal impact.");
         }
 
         return 0;
     }
 
-    private static async Task<bool> PublishSnapshotAsync(string filePath, string url)
-    {
-        if (!File.Exists(filePath))
-        {
-            Console.WriteLine($"Error: File not found: {filePath}");
-            return false;
-        }
 
-        Console.WriteLine($"🚀 Publishing snapshot to {url}...");
-        Console.WriteLine($"   File: {filePath}");
-
-        try
-        {
-            using var client = new HttpClient();
-            using var fileStream = File.OpenRead(filePath);
-            var content = new StreamContent(fileStream);
-            content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
-
-            var response = await client.PostAsync(url, content);
-
-            if (response.IsSuccessStatusCode)
-            {
-                var responseBody = await response.Content.ReadAsStringAsync();
-                Console.WriteLine("✅ Publish successful!");
-                Console.WriteLine($"   Response: {responseBody}");
-                return true;
-            }
-            else
-            {
-                Console.WriteLine($"❌ Publish failed. Status: {response.StatusCode}");
-                var errorBody = await response.Content.ReadAsStringAsync();
-                Console.WriteLine($"   Error: {errorBody}");
-                return false;
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"❌ Exception during publish: {ex.Message}");
-            return false;
-        }
-    }
 
     private static async Task<int> ExecuteFederate(string[] args)
     {
@@ -675,7 +612,7 @@ public class Program
             var json = await File.ReadAllTextAsync(path);
             var snapshot = JsonSerializer.Deserialize<Snapshot>(json, JsonOptions)!;
             snapshots.Add(snapshot);
-            Console.WriteLine($"  📂 Loaded: {path} ({snapshot.CodeAtoms.Count} code, {snapshot.SqlAtoms.Count} SQL atoms)");
+            Console.WriteLine($"  📂 Loaded: {path} ({snapshot.CodeAtoms.Count} components, {snapshot.SqlAtoms.Count} DB objects)");
         }
 
         // Configure options
@@ -691,10 +628,10 @@ public class Program
 
         // Output summary
         Console.WriteLine($"\n📊 Federation Summary:");
-        Console.WriteLine($"   Repos:       {federated.Stats.TotalRepos}");
-        Console.WriteLine($"   Code Atoms:  {federated.Stats.TotalCodeAtoms}");
-        Console.WriteLine($"   SQL Atoms:   {federated.Stats.TotalSqlAtoms}");
-        Console.WriteLine($"   Total Links: {federated.Stats.TotalLinks} ({federated.Stats.CrossRepoLinkCount} cross-repo)");
+        Console.WriteLine($"   Repos:        {federated.Stats.TotalRepos}");
+        Console.WriteLine($"   Components:   {federated.Stats.TotalCodeAtoms}");
+        Console.WriteLine($"   DB Objects:   {federated.Stats.TotalSqlAtoms}");
+        Console.WriteLine($"   Total Links:  {federated.Stats.TotalLinks} ({federated.Stats.CrossRepoLinkCount} cross-repo)");
 
         if (federated.Conflicts.Count > 0)
         {
@@ -781,7 +718,7 @@ public class Program
         sb.AppendLine($"\nRisk Report - {report.GeneratedAt:yyyy-MM-dd HH:mm}");
         sb.AppendLine("═══════════════════════════════════════════════\n");
         sb.AppendLine($"  Total: {report.TotalAtoms} | Critical: {report.Stats.CriticalCount} | High: {report.Stats.HighCount} | Medium: {report.Stats.MediumCount} | Low: {report.Stats.LowCount}\n");
-        sb.AppendLine($"Top {topN} Risky Atoms:");
+        sb.AppendLine($"Top {topN} Risky Components:");
         sb.AppendLine("───────────────────────────────────────────────");
 
         foreach (var score in report.Scores.Take(topN))
@@ -810,7 +747,7 @@ public class Program
         sb.AppendLine($"<div class=\"stat\"><div class=\"stat-val high\">{report.Stats.HighCount}</div>High</div>");
         sb.AppendLine($"<div class=\"stat\"><div class=\"stat-val medium\">{report.Stats.MediumCount}</div>Medium</div>");
         sb.AppendLine($"<div class=\"stat\"><div class=\"stat-val low\">{report.Stats.LowCount}</div>Low</div></div>");
-        sb.AppendLine($"<h2>Top {topN} Risky Atoms</h2><table><thead><tr><th>Atom</th><th>Risk</th><th>Score</th></tr></thead><tbody>");
+        sb.AppendLine($"<h2>Top {topN} Risky Components</h2><table><thead><tr><th>Component</th><th>Risk</th><th>Score</th></tr></thead><tbody>");
 
         foreach (var score in report.Scores.Take(topN))
         {
@@ -867,7 +804,7 @@ public class Program
         sb.AppendLine();
 
         sb.AppendLine("## 1. High-Level Vital Signs");
-        sb.AppendLine($"- **Code Volume**: {snapshot.Metadata.TotalCodeAtoms:N0} structured code units found.");
+        sb.AppendLine($"- **Code Volume**: {snapshot.Metadata.TotalCodeAtoms:N0} components found.");
         sb.AppendLine($"- **Database Surface**: {snapshot.Metadata.TotalSqlAtoms:N0} SQL objects detected.");
         sb.AppendLine($"- **Connectivity**: {snapshot.Metadata.TotalLinks:N0} relationships identified.");
         sb.AppendLine($"- **Complexity Density**: {((double)snapshot.Metadata.TotalLinks / (Math.Max(1, snapshot.Metadata.TotalCodeAtoms + snapshot.Metadata.TotalSqlAtoms))):F2} links per node.");
@@ -884,7 +821,7 @@ public class Program
         sb.AppendLine("### Top Namespaces (by Volume)");
         foreach (var ns in topNamespaces)
         {
-            sb.AppendLine($"- **`{ns.Key}`**: {ns.Count():N0} atoms");
+            sb.AppendLine($"- **`{ns.Key}`**: {ns.Count():N0} components");
         }
         sb.AppendLine();
 
@@ -1010,39 +947,7 @@ public class Program
         return null;
     }
 
-    private static async Task<int> ExecutePublish(string[] args)
-    {
-        string? filePath = null;
-        string url = "http://localhost:8080/load";
 
-        for (int i = 0; i < args.Length; i++)
-        {
-            switch (args[i])
-            {
-                case "--file" when i + 1 < args.Length:
-                    filePath = args[++i];
-                    break;
-                case "--url" when i + 1 < args.Length:
-                    url = args[++i];
-                    break;
-            }
-        }
-
-        if (string.IsNullOrEmpty(filePath))
-        {
-            Console.WriteLine("Error: --file is required");
-            return 1;
-        }
-
-        if (!File.Exists(filePath))
-        {
-            Console.WriteLine($"Error: File not found: {filePath}");
-            return 1;
-        }
-
-        var success = await PublishSnapshotAsync(filePath, url);
-        return success ? 0 : 1;
-    }
 
     private static async Task<int> ExecuteReport(string[] args)
     {
