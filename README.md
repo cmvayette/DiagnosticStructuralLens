@@ -221,4 +221,4 @@ src/
 
 ## License
 
-Proprietary — Internal use only.
+MIT
